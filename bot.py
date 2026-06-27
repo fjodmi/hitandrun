@@ -789,7 +789,7 @@ async def handle_free_text(message: Message, state: FSMContext):
 
     await processing.delete()
 
-    command = result.get("command", "unknown")
+    command = result.get("command", "unknown") if result else "unknown"
 
     if command == "unknown" or not result:
         await message.answer(
