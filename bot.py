@@ -405,10 +405,9 @@ async def process_payment(message: Message, state: FSMContext):
     await state.clear()
     p = get_player(pid)
     emoji = "💵" if ptype == "cash" else "💳"
-    new_bal = p[2] + amount
     await message.answer(
         "✅ Пополнено " + str(int(amount)) + " € " + emoji + " для " + p[1] + "\n" +
-        "Новый баланс: " + str(round(new_bal, 2)) + " €",
+        "Новый баланс: " + str(round(p[2], 2)) + " €",
         reply_markup=main_menu())
 
 @dp.callback_query(F.data.startswith("player_delete:"))
