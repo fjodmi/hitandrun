@@ -117,12 +117,15 @@ def delete_training(training_id):
 
 def get_training_players(training_id):
     with db() as conn:
-        return conn.execute("""
-            SELECT tp.*, p.name FROM training_players tp
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT tp.id, tp.training_id, tp.player_id, tp.status, tp.paid, tp.payment_type, tp.note, p.name
+            FROM training_players tp
             JOIN players p ON tp.player_id = p.id
             WHERE tp.training_id = ?
             ORDER BY p.name
         """, (training_id,)).fetchall()
+        return [tuple(r) for r in rows]
 
 def add_player_to_training(training_id, player_id):
     with db() as conn:
@@ -379,7 +382,7 @@ async def show_trainings(msg, edit=False):
         buttons = []
         for t in trainings:
             tp = get_training_players(t[0])
-            paid_count = sum(1 for p in tp if p[5] > 0)
+            paid_count = sum(1 for p in tp if p[4] > 0)
             buttons.append([InlineKeyboardButton(
                 text=f"{t[1]}  👥{len(tp)}  💰{paid_count}/{len(tp)}",
                 callback_data=f"training_view:{t[0]}")])
@@ -412,9 +415,9 @@ async def process_training_date(message: Message, state: FSMContext):
 async def show_training_view(msg, training_id, edit=False):
     t = get_training(training_id)
     tp = get_training_players(training_id)
-    total_paid = sum(p[5] for p in tp)
-    total_cash = sum(p[5] for p in tp if p[6] == "cash")
-    total_card = sum(p[5] for p in tp if p[6] == "card")
+    total_paid = sum(p[4] for p in tp)
+    total_cash = sum(p[4] for p in tp if p[5] == "cash")
+    total_card = sum(p[4] for p in tp if p[5] == "card")
     expected = len(tp) * t[2]
 
     text = (f"📅 <b>Тренировка {t[1]}</b>\n"
@@ -426,9 +429,9 @@ async def show_training_view(msg, training_id, edit=False):
     type_map = {"cash": "💵", "card": "💳"}
     for p in tp:
         s = status_map.get(p[4], "⬜️")
-        paid_text = f" {p[5]:.0f}€{type_map.get(p[6],'')}" if p[5] > 0 else ""
-        note_text = f" ({p[7]})" if p[7] else ""
-        text += f"{s} {p[8]}{paid_text}{note_text}\n"
+        paid_text = f" {p[4]:.0f}€{type_map.get(p[5],'')}" if p[4] > 0 else ""
+        note_text = f" ({p[6]})" if p[6] else ""
+        text += f"{s} {p[7]}{paid_text}{note_text}\n"
 
     buttons = [
         [InlineKeyboardButton(text="➕ Добавить участника", callback_data=f"training_add_player:{training_id}")],
@@ -497,11 +500,11 @@ async def cb_training_add_player_confirm(callback: CallbackQuery):
 async def cb_training_pay(callback: CallbackQuery):
     training_id = int(callback.data.split(":")[1])
     tp = get_training_players(training_id)
-    unpaid = [p for p in tp if p[5] == 0 and p[4] != "cancelled"]
+    unpaid = [p for p in tp if p[4] == 0 and p[3] != "cancelled"]
     if not unpaid:
         await callback.answer("Все уже оплатили!", show_alert=True)
         return
-    buttons = [[InlineKeyboardButton(text=p[8], callback_data=f"training_pay_player:{training_id}:{p[2]}")]
+    buttons = [[InlineKeyboardButton(text=p[7], callback_data=f"training_pay_player:{training_id}:{p[2]}")]
                for p in unpaid]
     buttons.append(back_kb(f"training_view:{training_id}"))
     await callback.message.edit_text("Кто оплатил?",
@@ -553,7 +556,7 @@ async def cb_training_cancel(callback: CallbackQuery):
     training_id = int(callback.data.split(":")[1])
     tp = get_training_players(training_id)
     active = [p for p in tp if p[4] != "cancelled"]
-    buttons = [[InlineKeyboardButton(text=p[8], callback_data=f"training_cancel_confirm:{training_id}:{p[2]}")]
+    buttons = [[InlineKeyboardButton(text=p[7], callback_data=f"training_cancel_confirm:{training_id}:{p[2]}")]
                for p in active]
     buttons.append(back_kb(f"training_view:{training_id}"))
     await callback.message.edit_text("Кто отменяет?",
@@ -578,7 +581,7 @@ async def cb_cancel_refund(callback: CallbackQuery):
     _, training_id, player_id = callback.data.split(":")
     training_id, player_id = int(training_id), int(player_id)
     tp_row = next((p for p in get_training_players(training_id) if p[2] == player_id), None)
-    if tp_row and tp_row[5] > 0:
+    if tp_row and tp_row[4] > 0:
         set_player_paid(training_id, player_id, 0)
     set_player_status(training_id, player_id, "cancelled", "возврат")
     p = get_player(player_id)
