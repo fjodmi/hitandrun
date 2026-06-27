@@ -493,8 +493,14 @@ async def cb_training_add_player_confirm(callback: CallbackQuery):
     training_id, player_id = int(training_id), int(player_id)
     add_player_to_training(training_id, player_id)
     p = get_player(player_id)
-    await callback.answer(f"✅ {p[1]} добавлен!")
-    await show_training_view(callback.message, training_id, edit=True)
+    t = get_training(training_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💵 Нал", callback_data=f"training_pay_type:{training_id}:{player_id}:cash"),
+         InlineKeyboardButton(text="💳 Безнал", callback_data=f"training_pay_type:{training_id}:{player_id}:card")],
+        [InlineKeyboardButton(text="⏳ Ещё не оплатил", callback_data=f"training_view:{training_id}")]
+    ])
+    text = "✅ <b>" + p[1] + "</b> добавлен на тренировку " + t[1] + ".\n\nОн уже оплатил?"
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("training_pay:"))
 async def cb_training_pay(callback: CallbackQuery):
