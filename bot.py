@@ -220,6 +220,7 @@ class AddPlayer(StatesGroup):
 
 class AddTraining(StatesGroup):
     waiting_date = State()
+    waiting_price = State()
 
 class DuplicateTraining(StatesGroup):
     waiting_date = State()
@@ -465,9 +466,26 @@ async def cb_training_add(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(AddTraining.waiting_date)
 async def process_training_date(message: Message, state: FSMContext):
+    date = message.text.strip()
+    await state.update_data(date=date)
+    await state.set_state(AddTraining.waiting_price)
+    await message.answer("Тренировка " + date + ". Сколько стоит? (стандартно 16 €):", reply_markup=back_button("trainings"))
+
+@dp.message(AddTraining.waiting_price)
+async def process_training_price(message: Message, state: FSMContext):
+    try:
+        price = float(message.text.replace(",", "."))
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи сумму, например: 16")
+        return
+    data = await state.get_data()
     await state.clear()
-    add_training(message.text.strip())
-    await message.answer("✅ Тренировка " + message.text.strip() + " создана!", reply_markup=main_menu())
+    add_training(data["date"], price)
+    await message.answer(
+        "✅ Тренировка " + data["date"] + " создана! Цена: " + str(int(price)) + " €",
+        reply_markup=main_menu())
 
 async def show_training_view(msg, training_id, edit=False):
     t = get_training(training_id)
