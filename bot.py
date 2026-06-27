@@ -712,7 +712,7 @@ async def parse_ai_command(text: str, trainings: list, players: list) -> dict:
     player_list = "\n".join([p[1] + " (id=" + str(p[0]) + ")" for p in players])
 
     system = """Ты помощник для управления тренировками по бадминтону.
-Пользователь описывает что произошло — кто записался на тренировку, кто оплатил.
+Пользователь может давать разные команды.
 
 Список тренировок:
 """ + training_list + """
@@ -720,22 +720,29 @@ async def parse_ai_command(text: str, trainings: list, players: list) -> dict:
 Список участников:
 """ + player_list + """
 
-Верни ТОЛЬКО JSON без пояснений:
+Верни ТОЛЬКО JSON без пояснений в одном из форматов:
+
+1. Добавить нового участника в общий список:
+{"command": "add_player", "name": "<имя>"}
+
+2. Записать участников на тренировку (и опционально зачислить оплату):
 {
-  "training_id": <id тренировки или null>,
+  "command": "register",
+  "training_id": <id тренировки>,
   "actions": [
     {
-      "player_id": <id участника>,
-      "action": "register",
+      "player_id": <id существующего участника или null если новый>,
+      "name": "<имя если новый участник>",
       "payment": <сумма или null>,
       "payment_type": "cash" или "card" или null
     }
   ]
 }
 
-Если участник оплатил — укажи payment и payment_type.
-Если просто записался без оплаты — payment: null.
-Если не можешь найти тренировку или участника — training_id: null или не включай в actions."""
+3. Пополнить баланс участника без записи на тренировку:
+{"command": "payment", "player_id": <id>, "amount": <сумма>, "payment_type": "cash" или "card"}
+
+Если не понял команду — верни: {"command": "unknown"}"""
 
     payload = {
         "model": "claude-sonnet-4-6",
@@ -782,44 +789,84 @@ async def handle_free_text(message: Message, state: FSMContext):
 
     await processing.delete()
 
-    if not result or not result.get("training_id"):
+    command = result.get("command", "unknown")
+
+    if command == "unknown" or not result:
         await message.answer(
-            "❌ Не смог распознать команду. Попробуй написать точнее, например:\n"
-            "<i>на тренировку 1.07 записались Иванов (оплатил безналом 32), Петров</i>",
+            "❌ Не смог распознать команду. Примеры:\n"
+            "<i>Добавь участника Иван Петров</i>\n"
+            "<i>На тренировку 1.07 записались Иванов (оплатил безналом 32), Петров</i>",
             parse_mode="HTML", reply_markup=main_menu())
         return
 
-    training_id = result["training_id"]
-    t = get_training(training_id)
-    if not t:
-        await message.answer("❌ Тренировка не найдена.", reply_markup=main_menu())
-        return
+    elif command == "add_player":
+        name = result.get("name", "").strip()
+        if not name:
+            await message.answer("❌ Не понял имя участника.", reply_markup=main_menu())
+            return
+        try:
+            add_player(name)
+            await message.answer("✅ Участник <b>" + name + "</b> добавлен!", parse_mode="HTML", reply_markup=main_menu())
+        except:
+            await message.answer("❌ Участник с таким именем уже есть.", reply_markup=main_menu())
 
-    actions = result.get("actions", [])
-    lines = ["📅 <b>Тренировка " + t[1] + "</b>\n"]
-
-    for action in actions:
-        pid = action.get("player_id")
+    elif command == "payment":
+        pid = result.get("player_id")
+        amount = result.get("amount")
+        ptype = result.get("payment_type", "cash")
         p = get_player(pid)
-        if not p:
-            continue
+        if not p or not amount:
+            await message.answer("❌ Не смог определить участника или сумму.", reply_markup=main_menu())
+            return
+        add_payment(pid, amount, ptype)
+        emoji = "💵" if ptype == "cash" else "💳"
+        await message.answer("✅ " + p[1] + " — пополнено " + str(int(amount)) + "€ " + emoji, reply_markup=main_menu())
 
-        # Register player
-        added = add_player_to_training(training_id, pid)
-        if added:
-            lines.append("✅ " + p[1] + " записан (-" + str(int(t[2])) + "€)")
-        else:
-            lines.append("ℹ️ " + p[1] + " уже был записан")
+    elif command == "register":
+        training_id = result.get("training_id")
+        t = get_training(training_id)
+        if not t:
+            await message.answer("❌ Тренировка не найдена.", reply_markup=main_menu())
+            return
 
-        # Add payment if specified
-        payment = action.get("payment")
-        ptype = action.get("payment_type")
-        if payment and ptype:
-            add_payment(pid, payment, ptype)
-            emoji = "💵" if ptype == "cash" else "💳"
-            lines.append("   " + emoji + " Оплата " + str(int(payment)) + "€ зачислена")
+        actions = result.get("actions", [])
+        lines = ["📅 <b>Тренировка " + t[1] + "</b>\n"]
 
-    await message.answer("\n".join(lines), reply_markup=main_menu(), parse_mode="HTML")
+        for action in actions:
+            pid = action.get("player_id")
+            name = action.get("name", "")
+
+            # Create new player if needed
+            if not pid and name:
+                try:
+                    add_player(name)
+                    p = get_players()
+                    p = next((x for x in p if x[1] == name), None)
+                    pid = p[0] if p else None
+                    lines.append("➕ Новый участник <b>" + name + "</b> добавлен")
+                except:
+                    lines.append("⚠️ Участник " + name + " уже существует")
+                    p = next((x for x in get_players() if x[1] == name), None)
+                    pid = p[0] if p else None
+
+            if not pid:
+                continue
+
+            p = get_player(pid)
+            added = add_player_to_training(training_id, pid)
+            if added:
+                lines.append("✅ " + p[1] + " записан (-" + str(int(t[2])) + "€)")
+            else:
+                lines.append("ℹ️ " + p[1] + " уже был записан")
+
+            payment = action.get("payment")
+            ptype = action.get("payment_type")
+            if payment and ptype:
+                add_payment(pid, payment, ptype)
+                emoji = "💵" if ptype == "cash" else "💳"
+                lines.append("   " + emoji + " Оплата " + str(int(payment)) + "€ зачислена")
+
+        await message.answer("\n".join(lines), reply_markup=main_menu(), parse_mode="HTML")
 
 
 async def set_commands():
