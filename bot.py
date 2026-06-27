@@ -1,6 +1,7 @@
 import logging
 import sqlite3
 import os
+import json
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -700,6 +701,126 @@ async def process_shuttle_remove(message: Message, state: FSMContext):
     await state.clear()
     warning = "\n⚠️ Пора покупать!" if balance <= 5 else ""
     await message.answer("✅ Списано " + str(amount) + " коробок. Остаток: " + str(balance) + warning, reply_markup=main_menu())
+
+async def parse_ai_command(text: str, trainings: list, players: list) -> dict:
+    import aiohttp
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    training_list = "\n".join([t[1] + " (id=" + str(t[0]) + ", цена=" + str(int(t[2])) + "€)" for t in trainings])
+    player_list = "\n".join([p[1] + " (id=" + str(p[0]) + ")" for p in players])
+
+    system = """Ты помощник для управления тренировками по бадминтону.
+Пользователь описывает что произошло — кто записался на тренировку, кто оплатил.
+
+Список тренировок:
+""" + training_list + """
+
+Список участников:
+""" + player_list + """
+
+Верни ТОЛЬКО JSON без пояснений:
+{
+  "training_id": <id тренировки или null>,
+  "actions": [
+    {
+      "player_id": <id участника>,
+      "action": "register",
+      "payment": <сумма или null>,
+      "payment_type": "cash" или "card" или null
+    }
+  ]
+}
+
+Если участник оплатил — укажи payment и payment_type.
+Если просто записался без оплаты — payment: null.
+Если не можешь найти тренировку или участника — training_id: null или не включай в actions."""
+
+    payload = {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 500,
+        "system": system,
+        "messages": [{"role": "user", "content": text}]
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json=payload
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            raw = data["content"][0]["text"].strip()
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            return json.loads(raw)
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def handle_free_text(message: Message, state: FSMContext):
+    if not is_authorized(message.from_user.id):
+        return
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
+    processing = await message.answer("⏳ Обрабатываю...")
+
+    trainings = get_trainings()
+    players = get_players()
+
+    try:
+        result = await parse_ai_command(message.text, trainings, players)
+    except Exception as e:
+        result = None
+
+    await processing.delete()
+
+    if not result or not result.get("training_id"):
+        await message.answer(
+            "❌ Не смог распознать команду. Попробуй написать точнее, например:\n"
+            "<i>на тренировку 1.07 записались Иванов (оплатил безналом 32), Петров</i>",
+            parse_mode="HTML", reply_markup=main_menu())
+        return
+
+    training_id = result["training_id"]
+    t = get_training(training_id)
+    if not t:
+        await message.answer("❌ Тренировка не найдена.", reply_markup=main_menu())
+        return
+
+    actions = result.get("actions", [])
+    lines = ["📅 <b>Тренировка " + t[1] + "</b>\n"]
+
+    for action in actions:
+        pid = action.get("player_id")
+        p = get_player(pid)
+        if not p:
+            continue
+
+        # Register player
+        added = add_player_to_training(training_id, pid)
+        if added:
+            lines.append("✅ " + p[1] + " записан (-" + str(int(t[2])) + "€)")
+        else:
+            lines.append("ℹ️ " + p[1] + " уже был записан")
+
+        # Add payment if specified
+        payment = action.get("payment")
+        ptype = action.get("payment_type")
+        if payment and ptype:
+            add_payment(pid, payment, ptype)
+            emoji = "💵" if ptype == "cash" else "💳"
+            lines.append("   " + emoji + " Оплата " + str(int(payment)) + "€ зачислена")
+
+    await message.answer("\n".join(lines), reply_markup=main_menu(), parse_mode="HTML")
+
 
 async def set_commands():
     await bot.set_my_commands([
