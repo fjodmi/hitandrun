@@ -273,6 +273,7 @@ async def cmd_menu(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "clear_chat")
 async def cb_clear_chat(callback: CallbackQuery, state: FSMContext):
     global _last_clear_time
+    _last_clear_time = time.time()
     await callback.answer()
     await state.clear()
     chat_id = callback.message.chat.id
