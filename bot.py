@@ -712,37 +712,32 @@ async def parse_ai_command(text: str, trainings: list, players: list) -> dict:
     player_list = "\n".join([p[1] + " (id=" + str(p[0]) + ")" for p in players])
 
     system = """Ты помощник для управления тренировками по бадминтону.
-Пользователь может давать разные команды.
+Пользователь может давать разные команды на русском языке.
 
 Список тренировок:
 """ + training_list + """
 
-Список участников:
+Список участников (уже существующих):
 """ + player_list + """
 
-Верни ТОЛЬКО JSON без пояснений в одном из форматов:
+Верни ТОЛЬКО валидный JSON без пояснений и без markdown.
 
-1. Добавить нового участника в общий список:
-{"command": "add_player", "name": "<имя>"}
+Возможные команды:
 
-2. Записать участников на тренировку (и опционально зачислить оплату):
-{
-  "command": "register",
-  "training_id": <id тренировки>,
-  "actions": [
-    {
-      "player_id": <id существующего участника или null если новый>,
-      "name": "<имя если новый участник>",
-      "payment": <сумма или null>,
-      "payment_type": "cash" или "card" или null
-    }
-  ]
-}
+1. Добавить нового участника (без привязки к тренировке):
+{"command": "add_player", "name": "<полное имя>", "payment": <сумма или null>, "payment_type": "cash" или "card" или null}
 
-3. Пополнить баланс участника без записи на тренировку:
+2. Записать участников на конкретную тренировку:
+{"command": "register", "training_id": <id>, "actions": [{"player_id": <id или null>, "name": "<имя если новый>", "payment": <сумма или null>, "payment_type": "cash" или "card" или null}]}
+
+3. Пополнить баланс существующего участника:
 {"command": "payment", "player_id": <id>, "amount": <сумма>, "payment_type": "cash" или "card"}
 
-Если не понял команду — верни: {"command": "unknown"}"""
+Правила:
+- Если говорят "добавь участника" без упоминания тренировки — это команда add_player
+- Если говорят "записались на тренировку" — это команда register
+- "нал" / "наличными" / "наличные" = cash, "безнал" / "картой" / "переводом" = card
+- Если не понял — {"command": "unknown"}"""
 
     payload = {
         "model": "claude-sonnet-4-6",
@@ -806,7 +801,16 @@ async def handle_free_text(message: Message, state: FSMContext):
             return
         try:
             add_player(name)
-            await message.answer("✅ Участник <b>" + name + "</b> добавлен!", parse_mode="HTML", reply_markup=main_menu())
+            lines = ["✅ Участник <b>" + name + "</b> добавлен!"]
+            payment = result.get("payment")
+            ptype = result.get("payment_type")
+            if payment and ptype:
+                p = next((x for x in get_players() if x[1] == name), None)
+                if p:
+                    add_payment(p[0], payment, ptype)
+                    emoji = "💵" if ptype == "cash" else "💳"
+                    lines.append(emoji + " Оплата " + str(int(payment)) + "€ зачислена. Баланс: " + str(int(payment)) + "€")
+            await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=main_menu())
         except:
             await message.answer("❌ Участник с таким именем уже есть.", reply_markup=main_menu())
 
