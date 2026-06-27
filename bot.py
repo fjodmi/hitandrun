@@ -254,7 +254,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.delete()
     except:
         pass
-    if time.time() - _last_clear_time < 15:
+    if time.time() - _last_clear_time < 60:
         return
     await state.clear()
     await bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
