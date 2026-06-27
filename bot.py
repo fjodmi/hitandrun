@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-DB = "badminton.db"
+DB = "/data/badminton.db"
 PRICE = 16
 
 def init_db():
