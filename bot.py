@@ -254,7 +254,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.delete()
     except:
         pass
-    if time.time() - _last_clear_time < 5:
+    if time.time() - _last_clear_time < 15:
         return
     await state.clear()
     await bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
@@ -283,8 +283,6 @@ async def cb_clear_chat(callback: CallbackQuery, state: FSMContext):
         except:
             pass
     _last_clear_time = time.time()
-    import asyncio
-    await asyncio.sleep(0.5)
     await bot.send_message(chat_id, "Главное меню:", reply_markup=main_menu())
 
 @dp.callback_query(F.data.startswith("back:"))
