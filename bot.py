@@ -522,7 +522,7 @@ async def show_trainings(msg, edit=False):
         buttons = []
         for t in trainings:
             tp = get_training_players(t[0])
-            max_p = t[3] if len(t) > 3 else 16
+            max_p = int(t[3]) if len(t) > 3 and t[3] else 16
             buttons.append([InlineKeyboardButton(
                 text=t[1] + "  👥" + str(len(tp)) + "/" + str(max_p) + "  " + str(int(t[2])) + "€",
                 callback_data="training_view:" + str(t[0]))])
@@ -603,8 +603,8 @@ async def show_training_view(msg, training_id, edit=False):
     t = get_training(training_id)
     tp = get_training_players(training_id)
     n = len(tp)
-    max_p = t[3] if len(t) > 3 else 16
-    court_price = t[4] if len(t) > 4 else 24.75
+    max_p = int(t[3]) if len(t) > 3 and t[3] else 16
+    court_price = float(t[4]) if len(t) > 4 and t[4] else 24.75
     collected = n * t[2]
     courts, court_cost = calc_courts(n, court_price)
     profit = collected - court_cost
@@ -666,7 +666,7 @@ async def cb_training_add_player(callback: CallbackQuery):
     players = get_players()
     tp = get_training_players(tid)
     already_ids = {p[0] for p in tp}
-    max_p = t[3] if len(t) > 3 else 16
+    max_p = int(t[3]) if len(t) > 3 and t[3] else 16
     if len(tp) >= max_p:
         await callback.answer("Все места заняты! (" + str(max_p) + "/" + str(max_p) + ")", show_alert=True)
         return
