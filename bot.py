@@ -254,9 +254,10 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.delete()
     except:
         pass
-    if time.time() - _last_clear_time < 60:
+    if time.time() - _last_clear_time < 300:
         return
     await state.clear()
+    _last_clear_time = time.time()
     await bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
 
 @dp.callback_query(F.data == "noop")
@@ -278,7 +279,7 @@ async def cb_clear_chat(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     chat_id = callback.message.chat.id
     current_id = callback.message.message_id
-    for msg_id in range(current_id, max(current_id - 200, 0), -1):
+    for msg_id in range(current_id, max(current_id - 50, 0), -1):
         try:
             await bot.delete_message(chat_id, msg_id)
         except:
