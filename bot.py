@@ -247,7 +247,6 @@ def back_button(to="main"):
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     global _last_clear_time
-    logging.info("CMD_START time_since_clear=" + str(round(time.time() - _last_clear_time, 1)))
     if not is_authorized(message.from_user.id):
         await message.answer("⛔️ Нет доступа.")
         return
@@ -255,12 +254,11 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.delete()
     except:
         pass
-    if time.time() - _last_clear_time < 300:
-        logging.info("CMD_START ignored")
-        return
-    await state.clear()
-    _last_clear_time = time.time()
-    await bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
+    # Only show menu if it's a genuine first start (not after clear)
+    if time.time() - _last_clear_time > 300:
+        await state.clear()
+        _last_clear_time = time.time()
+        await bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
 
 @dp.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery):
@@ -277,7 +275,10 @@ async def cmd_menu(message: Message, state: FSMContext):
 async def cb_clear_chat(callback: CallbackQuery, state: FSMContext):
     global _last_clear_time
     _last_clear_time = time.time()
-    await callback.answer()
+    try:
+        await callback.answer()
+    except:
+        pass
     await state.clear()
     chat_id = callback.message.chat.id
     current_id = callback.message.message_id
