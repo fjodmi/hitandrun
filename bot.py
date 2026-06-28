@@ -280,6 +280,9 @@ class AddTraining(StatesGroup):
 
 class DuplicateTraining(StatesGroup):
     waiting_date = State()
+    waiting_price = State()
+    waiting_max_players = State()
+    waiting_court_price = State()
 
 class AddPayment(StatesGroup):
     waiting_amount = State()
@@ -366,6 +369,10 @@ async def cb_back(callback: CallbackQuery, state: FSMContext):
         await show_player_view(callback.message, pid, edit=True)
 
 # ==================== DEBTORS ====================
+@dp.callback_query(F.data == "noop")
+async def cb_noop(callback: CallbackQuery):
+    await callback.answer()
+
 @dp.callback_query(F.data == "debtors")
 async def cb_debtors(callback: CallbackQuery):
     debtors = get_debtors()
@@ -523,24 +530,44 @@ async def cb_player_delete_confirm(callback: CallbackQuery):
 # ==================== TRAININGS ====================
 async def show_trainings(msg, edit=False):
     trainings = get_trainings()
-    if not trainings:
-        text = "📅 Тренировок пока нет."
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Создать", callback_data="training_add")],
-            back_kb()
-        ])
-    else:
-        text = "📅 <b>Тренировки:</b>\n"
-        buttons = []
-        for t in trainings:
+    today = datetime.now().strftime("%d.%m.%Y")
+
+    def parse_date(d):
+        try:
+            return datetime.strptime(d, "%d.%m.%Y")
+        except:
+            return datetime.min
+
+    upcoming = [t for t in trainings if parse_date(t[1]) >= datetime.now().replace(hour=0,minute=0,second=0,microsecond=0)]
+    past = [t for t in trainings if parse_date(t[1]) < datetime.now().replace(hour=0,minute=0,second=0,microsecond=0)]
+
+    text = "📅 <b>Тренировки:</b>\n"
+    buttons = []
+
+    if upcoming:
+        buttons.append([InlineKeyboardButton(text="── 📅 Предстоящие ──", callback_data="noop")])
+        for t in sorted(upcoming, key=lambda x: parse_date(x[1])):
             tp = get_training_players(t[0])
             max_p = int(t[3])
             buttons.append([InlineKeyboardButton(
                 text=t[1] + "  👥" + str(len(tp)) + "/" + str(max_p) + "  " + str(int(t[2])) + "€",
                 callback_data="training_view:" + str(t[0]))])
-        buttons.append([InlineKeyboardButton(text="➕ Создать", callback_data="training_add")])
-        buttons.append(back_kb())
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    if past:
+        buttons.append([InlineKeyboardButton(text="── 📁 Прошедшие ──", callback_data="noop")])
+        for t in sorted(past, key=lambda x: parse_date(x[1]), reverse=True)[:10]:
+            tp = get_training_players(t[0])
+            max_p = int(t[3])
+            buttons.append([InlineKeyboardButton(
+                text=t[1] + "  👥" + str(len(tp)) + "/" + str(max_p) + "  " + str(int(t[2])) + "€",
+                callback_data="training_view:" + str(t[0]))])
+
+    if not upcoming and not past:
+        text = "📅 Тренировок пока нет."
+
+    buttons.append([InlineKeyboardButton(text="➕ Создать", callback_data="training_add")])
+    buttons.append(back_kb())
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     if edit:
         await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -665,10 +692,62 @@ async def cb_training_duplicate(callback: CallbackQuery, state: FSMContext):
 @dp.message(DuplicateTraining.waiting_date)
 async def process_duplicate_date(message: Message, state: FSMContext):
     data = await state.get_data()
-    duplicate_training(data["training_id"], message.text.strip())
+    t = get_training(data["training_id"])
+    await state.update_data(new_date=message.text.strip())
+    await state.set_state(DuplicateTraining.waiting_price)
+    await message.answer("Дата: " + message.text.strip() + "\nЦена участия? (была " + str(int(t[2])) + " €):")
+
+@dp.message(DuplicateTraining.waiting_price)
+async def process_dup_price(message: Message, state: FSMContext):
+    try:
+        price = float(message.text.replace(",", "."))
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи сумму, например: 16")
+        return
+    data = await state.get_data()
+    t = get_training(data["training_id"])
+    await state.update_data(price=price)
+    await state.set_state(DuplicateTraining.waiting_max_players)
+    await message.answer("Максимум участников? (было " + str(int(t[3])) + "):")
+
+@dp.message(DuplicateTraining.waiting_max_players)
+async def process_dup_max(message: Message, state: FSMContext):
+    try:
+        max_p = int(message.text.strip())
+        if max_p <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи число, например: 16")
+        return
+    data = await state.get_data()
+    t = get_training(data["training_id"])
+    await state.update_data(max_players=max_p)
+    await state.set_state(DuplicateTraining.waiting_court_price)
+    await message.answer("Цена корта? (была " + str(float(t[4])) + " €):")
+
+@dp.message(DuplicateTraining.waiting_court_price)
+async def process_dup_court(message: Message, state: FSMContext):
+    try:
+        court_price = float(message.text.replace(",", "."))
+        if court_price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи сумму, например: 24.75")
+        return
+    data = await state.get_data()
+    # Create new training with new params
+    new_id = add_training(data["new_date"], data["price"], data["max_players"], court_price)
+    # Copy players from original
+    tp = get_training_players(data["training_id"])
+    for p in tp:
+        add_player_to_training(new_id, p[0])
     await state.clear()
+    n = len(tp)
     await message.answer(
-        "✅ Тренировка скопирована на " + message.text.strip() + "! Участники записаны, деньги списаны.",
+        "✅ Тренировка скопирована на " + data["new_date"] + "!\n" +
+        "👥 Записано " + str(n) + " участников, деньги списаны.",
         reply_markup=main_menu())
 
 @dp.callback_query(F.data.startswith("training_add_player:"))
@@ -755,20 +834,74 @@ async def cb_training_delete_confirm(callback: CallbackQuery):
 # ==================== FINANCES ====================
 @dp.callback_query(F.data == "finances")
 async def cb_finances(callback: CallbackQuery):
-    months = get_month_finances()
+    trainings = get_trainings()
     players = get_players()
     debtors = [p for p in players if p[2] < 0]
     creditors = [p for p in players if p[2] > 0]
-    text = "💰 <b>Финансы по месяцам:</b>\n\n"
-    total_all = 0
-    for month, data in months.items():
-        cash = data.get("cash", 0)
-        card = data.get("card", 0)
-        total = cash + card
-        total_all += total
-        text += "<b>" + month + ":</b>  " + str(int(total)) + " €\n"
-        text += "  💵 Нал: " + str(int(cash)) + " €  💳 Безнал: " + str(int(card)) + " €\n\n"
-    text += "<b>Итого: " + str(int(total_all)) + " €</b>\n\n"
+
+    # Group trainings by month
+    from collections import defaultdict
+    by_month = defaultdict(list)
+    for t in trainings:
+        try:
+            parts = t[1].split(".")
+            if len(parts) == 3:
+                month_key = parts[1] + "." + parts[2]
+            else:
+                month_key = "other"
+        except:
+            month_key = "other"
+        by_month[month_key].append(t)
+
+    # Get income payments by month
+    months_income = get_month_finances()
+
+    text = "💰 <b>Финансы</b>\n\n"
+    total_collected = 0
+    total_courts = 0
+    total_profit = 0
+
+    for month in sorted(by_month.keys(), reverse=True):
+        month_trainings = by_month[month]
+        month_collected = 0
+        month_courts = 0
+
+        text += "📅 <b>" + month + "</b>\n"
+
+        for t in sorted(month_trainings, key=lambda x: x[1]):
+            tp = get_training_players(t[0])
+            n = len(tp)
+            court_price = float(t[4])
+            courts, court_cost = calc_courts(n, court_price)
+            collected = n * t[2]
+            profit = collected - court_cost
+            month_collected += collected
+            month_courts += court_cost
+
+            text += ("  " + t[1] + ": " + str(int(collected)) + "€" +
+                     " | 🏟" + str(courts) + "×" + str(court_price) + "=" + str(round(court_cost,2)) + "€" +
+                     " | 📈" + str(round(profit,2)) + "€\n")
+
+        month_profit = month_collected - month_courts
+        income = months_income.get(month, {})
+        cash = income.get("cash", 0)
+        card = income.get("card", 0)
+
+        text += ("  <b>Итого " + month + ":</b> " + str(int(month_collected)) + "€\n" +
+                 "  💵 Нал: " + str(int(cash)) + "€  💳 Безнал: " + str(int(card)) + "€\n" +
+                 "  🏟 Корты: " + str(round(month_courts,2)) + "€\n" +
+                 "  📈 Прибыль: <b>" + str(round(month_profit,2)) + "€</b>\n\n")
+
+        total_collected += month_collected
+        total_courts += month_courts
+        total_profit += month_profit
+
+    text += ("═══════════════\n"
+             "<b>Итого за всё время:</b>\n"
+             "💰 Собрано: " + str(int(total_collected)) + " €\n"
+             "🏟 Корты: " + str(round(total_courts,2)) + " €\n"
+             "📈 Прибыль: <b>" + str(round(total_profit,2)) + " €</b>\n\n")
+
     if debtors:
         text += "⚠️ <b>Должники:</b>\n"
         for p in debtors:
@@ -780,6 +913,7 @@ async def cb_finances(callback: CallbackQuery):
             text += "  " + p[1] + ": +" + str(int(p[2])) + " €\n"
     if not debtors and not creditors:
         text += "✅ Все расчёты в порядке"
+
     await callback.message.edit_text(text, reply_markup=back_button(), parse_mode="HTML")
 
 # ==================== SHUTTLECOCKS ====================
