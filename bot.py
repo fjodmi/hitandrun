@@ -284,7 +284,7 @@ async def cb_clear_chat(callback: CallbackQuery, state: FSMContext):
     current_id = callback.message.message_id
     import asyncio
     tasks = [bot.delete_message(chat_id, msg_id) 
-             for msg_id in range(current_id, max(current_id - 50, 0), -1)]
+             for msg_id in range(current_id, max(current_id - 15, 0), -1)]
     await asyncio.gather(*tasks, return_exceptions=True)
     _last_clear_time = time.time()
     await bot.send_message(chat_id, "Главное меню:", reply_markup=main_menu())
