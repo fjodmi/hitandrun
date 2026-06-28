@@ -3,13 +3,15 @@ import sqlite3
 import os
 import json
 import time
-from datetime import datetime
+import math
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 USER_IDS = list(filter(None, [os.getenv("USER_ID"), os.getenv("USER_ID_2")]))
@@ -18,9 +20,9 @@ USER_IDS = [int(x) for x in USER_IDS]
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+scheduler = AsyncIOScheduler(timezone="Europe/Tallinn")
 
 DB = "/data/badminton.db"
-PRICE = 16
 _last_clear_time = 0
 
 def init_db():
@@ -36,6 +38,8 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT NOT NULL,
         price REAL DEFAULT 16,
+        max_players INTEGER DEFAULT 16,
+        court_price REAL DEFAULT 24.75,
         created_at TEXT NOT NULL
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS training_players (
@@ -61,6 +65,15 @@ def init_db():
         reason TEXT,
         created_at TEXT NOT NULL
     )""")
+    # Migrate
+    try:
+        c.execute("ALTER TABLE trainings ADD COLUMN max_players INTEGER DEFAULT 16")
+        conn.commit()
+    except: pass
+    try:
+        c.execute("ALTER TABLE trainings ADD COLUMN court_price REAL DEFAULT 24.75")
+        conn.commit()
+    except: pass
     conn.commit()
     conn.close()
 
@@ -114,6 +127,10 @@ def get_player_stats(player_id):
             (player_id,)).fetchone()[0]
         return total_trainings, total_cash, total_card
 
+def get_debtors():
+    with get_db() as conn:
+        return conn.execute("SELECT * FROM players WHERE balance < 0 ORDER BY balance").fetchall()
+
 def get_trainings():
     with get_db() as conn:
         return conn.execute("SELECT * FROM trainings ORDER BY date DESC").fetchall()
@@ -122,16 +139,16 @@ def get_training(training_id):
     with get_db() as conn:
         return conn.execute("SELECT * FROM trainings WHERE id=?", (training_id,)).fetchone()
 
-def add_training(date, price=PRICE):
+def add_training(date, price=16, max_players=16, court_price=24.75):
     with get_db() as conn:
-        conn.execute("INSERT INTO trainings (date, price, created_at) VALUES (?, ?, ?)",
-                     (date, price, datetime.now().isoformat()))
+        conn.execute("INSERT INTO trainings (date, price, max_players, court_price, created_at) VALUES (?, ?, ?, ?, ?)",
+                     (date, price, max_players, court_price, datetime.now().isoformat()))
         conn.commit()
         return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 def duplicate_training(training_id, new_date):
     t = get_training(training_id)
-    new_id = add_training(new_date, t[2])
+    new_id = add_training(new_date, t[2], t[3], t[4])
     tp = get_training_players(training_id)
     for p in tp:
         add_player_to_training(new_id, p[0])
@@ -181,6 +198,12 @@ def remove_player_from_training(training_id, player_id):
             return True
         return False
 
+def calc_courts(n_players, court_price):
+    if n_players == 0:
+        return 0, 0
+    courts = math.ceil(n_players / 4)
+    return courts, courts * court_price
+
 def get_month_finances():
     with get_db() as conn:
         rows = conn.execute("""
@@ -209,6 +232,30 @@ def change_shuttlecocks(amount, reason):
 def is_authorized(user_id):
     return user_id in USER_IDS
 
+# --- Reminder job ---
+async def send_reminders():
+    in_2_days = (datetime.now() + timedelta(days=2)).strftime("%d.%m.%Y")
+    trainings = get_trainings()
+    for t in trainings:
+        if t[1] == in_2_days:
+            tp = get_training_players(t[0])
+            n = len(tp)
+            max_p = t[3]
+            courts, court_cost = calc_courts(n, t[4])
+            collected = n * t[2]
+            profit = collected - court_cost
+            text = ("🏸 <b>Послезавтра тренировка!</b>\n\n" +
+                    "📅 " + t[1] + "\n" +
+                    "👥 Записано: " + str(n) + " из " + str(max_p) + " мест\n" +
+                    "💰 Собрано: " + str(int(collected)) + " €\n" +
+                    "🏟 Корты: " + str(courts) + " × " + str(t[4]) + "€ = " + str(round(court_cost, 2)) + " €\n" +
+                    "📈 Прибыль: " + str(round(profit, 2)) + " €")
+            for uid in USER_IDS:
+                try:
+                    await bot.send_message(uid, text, parse_mode="HTML")
+                except:
+                    pass
+
 # --- States ---
 class AddPlayer(StatesGroup):
     waiting_name = State()
@@ -216,6 +263,8 @@ class AddPlayer(StatesGroup):
 class AddTraining(StatesGroup):
     waiting_date = State()
     waiting_price = State()
+    waiting_max_players = State()
+    waiting_court_price = State()
 
 class DuplicateTraining(StatesGroup):
     waiting_date = State()
@@ -233,8 +282,9 @@ def main_menu():
         [InlineKeyboardButton(text="📅 Тренировки", callback_data="trainings"),
          InlineKeyboardButton(text="👥 Участники", callback_data="players")],
         [InlineKeyboardButton(text="💰 Финансы", callback_data="finances"),
-         InlineKeyboardButton(text="🏸 Воланы", callback_data="shuttlecocks")],
-        [InlineKeyboardButton(text="🧹 Очистить чат", callback_data="clear_chat")],
+         InlineKeyboardButton(text="⚠️ Должники", callback_data="debtors")],
+        [InlineKeyboardButton(text="🏸 Воланы", callback_data="shuttlecocks"),
+         InlineKeyboardButton(text="🧹 Очистить чат", callback_data="clear_chat")],
     ])
 
 def back_kb(to="main"):
@@ -254,15 +304,10 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.delete()
     except:
         pass
-    # Only show menu if it's a genuine first start (not after clear)
     if time.time() - _last_clear_time > 300:
         await state.clear()
         _last_clear_time = time.time()
         await bot.send_message(message.chat.id, "Главное меню:", reply_markup=main_menu())
-
-@dp.callback_query(F.data == "noop")
-async def cb_noop(callback: CallbackQuery):
-    await callback.answer()
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: Message, state: FSMContext):
@@ -283,7 +328,7 @@ async def cb_clear_chat(callback: CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
     current_id = callback.message.message_id
     import asyncio
-    tasks = [bot.delete_message(chat_id, msg_id) 
+    tasks = [bot.delete_message(chat_id, msg_id)
              for msg_id in range(current_id, max(current_id - 15, 0), -1)]
     await asyncio.gather(*tasks, return_exceptions=True)
     _last_clear_time = time.time()
@@ -307,6 +352,18 @@ async def cb_back(callback: CallbackQuery, state: FSMContext):
     elif dest.startswith("player_view:"):
         pid = int(dest.split(":")[1])
         await show_player_view(callback.message, pid, edit=True)
+
+# ==================== DEBTORS ====================
+@dp.callback_query(F.data == "debtors")
+async def cb_debtors(callback: CallbackQuery):
+    debtors = get_debtors()
+    if not debtors:
+        text = "✅ Должников нет!"
+    else:
+        text = "⚠️ <b>Должники:</b>\n\n"
+        for p in debtors:
+            text += "• " + p[1] + ": " + str(int(p[2])) + " €\n"
+    await callback.message.edit_text(text, reply_markup=back_button(), parse_mode="HTML")
 
 # ==================== PLAYERS ====================
 async def show_players(msg, edit=False):
@@ -363,7 +420,6 @@ async def show_player_view(msg, player_id, edit=False):
     bal = p[2]
     bal_emoji = "✅" if bal >= 0 else "⚠️"
     bal_str = ("+" if bal > 0 else "") + str(round(bal, 2)) + " €"
-
     text = ("<b>" + p[1] + "</b>\n\n" +
             bal_emoji + " Баланс: <b>" + bal_str + "</b>\n\n" +
             "📊 <b>Статистика:</b>\n" +
@@ -371,7 +427,6 @@ async def show_player_view(msg, player_id, edit=False):
             "💵 Нал: " + str(int(total_cash)) + " €\n" +
             "💳 Безнал: " + str(int(total_card)) + " €\n" +
             "Итого: " + str(int(total_cash + total_card)) + " €")
-
     payments = get_player_payments(player_id)
     if payments:
         text += "\n\n📋 <b>Последние операции:</b>\n"
@@ -387,7 +442,6 @@ async def show_player_view(msg, player_id, edit=False):
             else:
                 emoji = "💵" if ptype == "cash" else "💳"
                 text += "➕ " + str(int(amt)) + "€ " + emoji + " " + date + "\n"
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💵 Пополнить нал", callback_data="pay_add:" + str(player_id) + ":cash"),
          InlineKeyboardButton(text="💳 Пополнить безнал", callback_data="pay_add:" + str(player_id) + ":card")],
@@ -468,8 +522,9 @@ async def show_trainings(msg, edit=False):
         buttons = []
         for t in trainings:
             tp = get_training_players(t[0])
+            max_p = t[3] if len(t) > 3 else 16
             buttons.append([InlineKeyboardButton(
-                text=t[1] + "  👥" + str(len(tp)) + "  " + str(int(t[2])) + "€",
+                text=t[1] + "  👥" + str(len(tp)) + "/" + str(max_p) + "  " + str(int(t[2])) + "€",
                 callback_data="training_view:" + str(t[0]))])
         buttons.append([InlineKeyboardButton(text="➕ Создать", callback_data="training_add")])
         buttons.append(back_kb())
@@ -496,7 +551,7 @@ async def process_training_date(message: Message, state: FSMContext):
     date = message.text.strip()
     await state.update_data(date=date)
     await state.set_state(AddTraining.waiting_price)
-    await message.answer("Тренировка " + date + ". Сколько стоит? (стандартно 16 €):", reply_markup=back_button("trainings"))
+    await message.answer("Дата: " + date + "\nСколько стоит участие? (стандартно 16 €):")
 
 @dp.message(AddTraining.waiting_price)
 async def process_training_price(message: Message, state: FSMContext):
@@ -507,19 +562,59 @@ async def process_training_price(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введи сумму, например: 16")
         return
+    await state.update_data(price=price)
+    await state.set_state(AddTraining.waiting_max_players)
+    await message.answer("Цена: " + str(int(price)) + " €\nМаксимум участников? (стандартно 16):")
+
+@dp.message(AddTraining.waiting_max_players)
+async def process_training_max(message: Message, state: FSMContext):
+    try:
+        max_p = int(message.text.strip())
+        if max_p <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи число, например: 16")
+        return
+    await state.update_data(max_players=max_p)
+    await state.set_state(AddTraining.waiting_court_price)
+    await message.answer("Мест: " + str(max_p) + "\nЦена корта? (стандартно 24.75 €):")
+
+@dp.message(AddTraining.waiting_court_price)
+async def process_training_court_price(message: Message, state: FSMContext):
+    try:
+        court_price = float(message.text.replace(",", "."))
+        if court_price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи сумму, например: 24.75")
+        return
     data = await state.get_data()
     await state.clear()
-    add_training(data["date"], price)
-    await message.answer("✅ Тренировка " + data["date"] + " создана! Цена: " + str(int(price)) + " €", reply_markup=main_menu())
+    add_training(data["date"], data["price"], data["max_players"], court_price)
+    await message.answer(
+        "✅ Тренировка создана!\n" +
+        "📅 " + data["date"] + "\n" +
+        "💰 " + str(int(data["price"])) + " € / чел\n" +
+        "👥 Мест: " + str(data["max_players"]) + "\n" +
+        "🏟 Корт: " + str(court_price) + " €",
+        reply_markup=main_menu())
 
 async def show_training_view(msg, training_id, edit=False):
     t = get_training(training_id)
     tp = get_training_players(training_id)
-    collected = len(tp) * t[2]
+    n = len(tp)
+    max_p = t[3] if len(t) > 3 else 16
+    court_price = t[4] if len(t) > 4 else 24.75
+    collected = n * t[2]
+    courts, court_cost = calc_courts(n, court_price)
+    profit = collected - court_cost
+    free_spots = max_p - n
 
     text = ("📅 <b>Тренировка " + t[1] + "</b>\n" +
-            "Цена: " + str(int(t[2])) + " €  |  Участников: " + str(len(tp)) + "\n" +
-            "Собрано: " + str(int(collected)) + " €\n\n")
+            "👥 Записано: " + str(n) + " из " + str(max_p) + " (" + str(free_spots) + " свободно)\n" +
+            "💰 Цена: " + str(int(t[2])) + " €/чел  |  Собрано: " + str(int(collected)) + " €\n" +
+            "🏟 Корты: " + str(courts) + " × " + str(court_price) + "€ = " + str(round(court_cost, 2)) + " €\n" +
+            "📈 Прибыль: <b>" + str(round(profit, 2)) + " €</b>\n\n")
 
     for p in tp:
         bal = p[2]
@@ -571,6 +666,10 @@ async def cb_training_add_player(callback: CallbackQuery):
     players = get_players()
     tp = get_training_players(tid)
     already_ids = {p[0] for p in tp}
+    max_p = t[3] if len(t) > 3 else 16
+    if len(tp) >= max_p:
+        await callback.answer("Все места заняты! (" + str(max_p) + "/" + str(max_p) + ")", show_alert=True)
+        return
     available = [p for p in players if p[0] not in already_ids]
     if not available:
         await callback.answer("Все участники уже записаны!", show_alert=True)
@@ -584,7 +683,7 @@ async def cb_training_add_player(callback: CallbackQuery):
             callback_data="training_add_confirm:" + str(tid) + ":" + str(p[0]))])
     buttons.append(back_kb("training_view:" + str(tid)))
     await callback.message.edit_text(
-        "Выбери участника для " + t[1] + " (-" + str(int(t[2])) + "€ с баланса):",
+        "Выбери участника для " + t[1] + " (-" + str(int(t[2])) + "€):\nМест: " + str(len(tp)) + "/" + str(max_p),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @dp.callback_query(F.data.startswith("training_add_confirm:"))
@@ -609,8 +708,9 @@ async def cb_training_remove_player(callback: CallbackQuery):
         text=p[1], callback_data="training_remove_confirm:" + str(tid) + ":" + str(p[0]))]
         for p in tp]
     buttons.append(back_kb("training_view:" + str(tid)))
+    t = get_training(tid)
     await callback.message.edit_text(
-        "Кого убрать? (16€ вернётся на баланс)",
+        "Кого убрать? (+" + str(int(t[2])) + "€ вернётся на баланс)",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @dp.callback_query(F.data.startswith("training_remove_confirm:"))
@@ -647,7 +747,6 @@ async def cb_finances(callback: CallbackQuery):
     players = get_players()
     debtors = [p for p in players if p[2] < 0]
     creditors = [p for p in players if p[2] > 0]
-
     text = "💰 <b>Финансы по месяцам:</b>\n\n"
     total_all = 0
     for month, data in months.items():
@@ -657,9 +756,7 @@ async def cb_finances(callback: CallbackQuery):
         total_all += total
         text += "<b>" + month + ":</b>  " + str(int(total)) + " €\n"
         text += "  💵 Нал: " + str(int(cash)) + " €  💳 Безнал: " + str(int(card)) + " €\n\n"
-
     text += "<b>Итого: " + str(int(total_all)) + " €</b>\n\n"
-
     if debtors:
         text += "⚠️ <b>Должники:</b>\n"
         for p in debtors:
@@ -671,7 +768,6 @@ async def cb_finances(callback: CallbackQuery):
             text += "  " + p[1] + ": +" + str(int(p[2])) + " €\n"
     if not debtors and not creditors:
         text += "✅ Все расчёты в порядке"
-
     await callback.message.edit_text(text, reply_markup=back_button(), parse_mode="HTML")
 
 # ==================== SHUTTLECOCKS ====================
@@ -734,10 +830,8 @@ async def parse_ai_command(text: str, trainings: list, players: list):
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
     if not ANTHROPIC_API_KEY:
         return None
-
     training_list = "\n".join([t[1] + " (id=" + str(t[0]) + ", цена=" + str(int(t[2])) + "€)" for t in trainings])
     player_list = "\n".join([p[1] + " (id=" + str(p[0]) + ")" for p in players])
-
     system = """Ты помощник для управления тренировками по бадминтону.
 Пользователь может давать разные команды на русском языке.
 
@@ -772,7 +866,6 @@ async def parse_ai_command(text: str, trainings: list, players: list):
         "system": system,
         "messages": [{"role": "user", "content": text}]
     }
-
     async with aiohttp.ClientSession() as session:
         async with session.post(
             "https://api.anthropic.com/v1/messages",
@@ -798,18 +891,14 @@ async def handle_free_text(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is not None:
         return
-
     processing = await message.answer("⏳ Обрабатываю...")
     trainings = get_trainings()
     players = get_players()
-
     try:
         result = await parse_ai_command(message.text, trainings, players)
     except Exception:
         result = None
-
     await processing.delete()
-
     command = result.get("command", "unknown") if result else "unknown"
 
     if command == "unknown":
@@ -818,7 +907,6 @@ async def handle_free_text(message: Message, state: FSMContext):
             "<i>Добавь участника Иван Петров, оплатил налом 32</i>\n"
             "<i>На тренировку 1.07 записались Иванов (безнал 32), Петров</i>",
             parse_mode="HTML", reply_markup=main_menu())
-        return
 
     elif command == "add_player":
         name = result.get("name", "").strip()
@@ -835,7 +923,7 @@ async def handle_free_text(message: Message, state: FSMContext):
                 if p:
                     add_payment(p[0], payment, ptype)
                     emoji = "💵" if ptype == "cash" else "💳"
-                    lines.append(emoji + " Оплата " + str(int(payment)) + "€ зачислена. Баланс: " + str(int(payment)) + "€")
+                    lines.append(emoji + " Оплата " + str(int(payment)) + "€ зачислена")
             await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=main_menu())
         except:
             await message.answer("❌ Участник с таким именем уже есть.", reply_markup=main_menu())
@@ -858,14 +946,11 @@ async def handle_free_text(message: Message, state: FSMContext):
         if not t:
             await message.answer("❌ Тренировка не найдена.", reply_markup=main_menu())
             return
-
         actions = result.get("actions", [])
         lines = ["📅 <b>Тренировка " + t[1] + "</b>\n"]
-
         for action in actions:
             pid = action.get("player_id")
             name = action.get("name", "")
-
             if not pid and name:
                 try:
                     add_player(name)
@@ -875,24 +960,20 @@ async def handle_free_text(message: Message, state: FSMContext):
                 except:
                     p = next((x for x in get_players() if x[1] == name), None)
                     pid = p[0] if p else None
-
             if not pid:
                 continue
-
             p = get_player(pid)
             added = add_player_to_training(training_id, pid)
             if added:
                 lines.append("✅ " + p[1] + " записан (-" + str(int(t[2])) + "€)")
             else:
                 lines.append("ℹ️ " + p[1] + " уже был записан")
-
             payment = action.get("payment")
             ptype = action.get("payment_type")
             if payment and ptype:
                 add_payment(pid, payment, ptype)
                 emoji = "💵" if ptype == "cash" else "💳"
                 lines.append("   " + emoji + " Оплата " + str(int(payment)) + "€ зачислена")
-
         await message.answer("\n".join(lines), reply_markup=main_menu(), parse_mode="HTML")
 
 
@@ -905,6 +986,8 @@ async def set_commands():
 async def main():
     init_db()
     await set_commands()
+    scheduler.add_job(send_reminders, "cron", hour=10, minute=0)
+    scheduler.start()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
