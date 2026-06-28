@@ -246,18 +246,17 @@ def back_button(to="main"):
 # --- Handlers ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    import logging
-    logging.info("CMD_START: user=" + str(message.from_user.id) + " time_since_clear=" + str(round(time.time() - _last_clear_time, 1)))
+    global _last_clear_time
+    logging.info("CMD_START time_since_clear=" + str(round(time.time() - _last_clear_time, 1)))
     if not is_authorized(message.from_user.id):
         await message.answer("⛔️ Нет доступа.")
         return
-    global _last_clear_time
     try:
         await message.delete()
     except:
         pass
     if time.time() - _last_clear_time < 300:
-        logging.info("CMD_START: ignored, too soon after clear")
+        logging.info("CMD_START ignored")
         return
     await state.clear()
     _last_clear_time = time.time()
